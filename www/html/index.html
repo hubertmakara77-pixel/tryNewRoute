@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OrangePi Router</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+
+<body class="bg-gray-50 text-gray-800">
+
+    <div id="login-screen" class="min-h-screen flex items-center justify-center">
+        <div class="bg-white p-8 rounded-xl shadow-2xl w-96 border-b-8 border-orange-600">
+            <h2 class="text-2xl font-bold mb-6 text-center text-orange-600 italic">OrangePi<span class="text-gray-800">
+                    Router Dashboard </span></h2>
+            <form id="login-form" class="space-y-4">
+                <input type="text" id="user" placeholder="Username"
+                    class="w-full p-3 border rounded-lg outline-none focus:ring-2 focus:ring-orange-500">
+                <input type="password" id="pass" placeholder="Password"
+                    class="w-full p-3 border rounded-lg outline-none focus:ring-2 focus:ring-orange-500">
+                <button type="submit"
+                    class="w-full bg-orange-600 text-white py-3 rounded-lg font-bold hover:bg-orange-700 transition">Log
+                    in</button>
+            </form>
+        </div>
+    </div>
+
+    <div id="dashboard" class="hidden flex h-screen">
+        <aside class="w-64 bg-orange-900 text-white p-6 shadow-xl">
+            <h1 class="text-2xl font-bold mb-10 italic">OrangePi Router</h1>
+            <nav class="space-y-4">
+                <button onclick="fetchData()" class="w-full text-left py-2 px-4 bg-orange-800 rounded-lg"><i
+                        class="fas fa-sync mr-2"></i> Refresh</button>
+                <button onclick="logout()"
+                    class="w-full text-left py-2 px-4 hover:bg-red-600 rounded-lg transition mt-20"><i
+                        class="fas fa-sign-out-alt mr-2"></i> Log out</button>
+            </nav>
+        </aside>
+
+        <main class="flex-1 p-10 overflow-y-auto">
+            <div class="flex justify-between items-center mb-8">
+                <h2 class="text-3xl font-bold">Router Configuration</h2>
+                <span id="loading-spinner" class="hidden animate-spin text-orange-600 text-2xl"><i
+                        class="fas fa-circle-notch"></i></span>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-10">
+                <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+                    <p class="text-xs font-black text-gray-400 uppercase">Local Gateway IP</p>
+                    <p id="ip-address" class="text-xl font-mono font-bold text-orange-700">---</p>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+
+                <div class="bg-white p-8 rounded-2xl shadow-sm border border-gray-200">
+                    <h3 class="text-lg font-bold mb-6 border-b pb-2 text-orange-800"><i
+                            class="fas fa-network-wired mr-2"></i>Interfaces and IP</h3>
+                    <div class="space-y-4">
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs font-bold text-gray-500 uppercase">In Interface</label>
+                                <input type="text" id="in-interface"
+                                    class="w-full p-2 border rounded bg-gray-50 font-mono" value="wlan0">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-gray-500 uppercase">Out Interface</label>
+                                <input type="text" id="out-interface"
+                                    class="w-full p-2 border rounded bg-gray-50 font-mono" value="end0">
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-gray-500 uppercase">Internal IP Address</label>
+                            <input type="text" id="int-ip" class="w-full p-2 border rounded font-mono"
+                                value="192.168.0.1">
+                        </div>
+                    </div>
+
+                    <h3 class="text-lg font-bold mb-6 mt-8 border-b pb-2 text-orange-800"><i
+                            class="fas fa-wifi mr-2"></i>Access Point (AP)</h3>
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-bold text-gray-500 uppercase">SSID Name</label>
+                            <input type="text" id="ssid-input"
+                                class="w-full p-2 border rounded shadow-inner font-semibold">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-gray-500 uppercase">WPA2 Password</label>
+                            <div class="relative">
+                                <input type="password" id="pass-input"
+                                    class="w-full p-2 border rounded shadow-inner pr-10">
+                                <button type="button" onclick="togglePassword()"
+                                    class="absolute inset-y-0 right-0 px-3 text-gray-500 hover:text-orange-600 focus:outline-none">
+                                    <i class="fas fa-eye" id="pass-icon"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <button onclick="applyWifi()"
+                            class="mt-2 w-full bg-orange-100 text-orange-800 border border-orange-200 py-2 rounded-lg font-bold hover:bg-orange-200 transition text-sm">
+                            <i class="fas fa-check mr-2"></i>Apply WiFi Settings
+                        </button>
+                    </div>
+                </div>
+
+                <div class="bg-white p-8 rounded-2xl shadow-sm border border-gray-200">
+                    <h3 class="text-lg font-bold mb-6 border-b pb-2 text-orange-800"><i
+                            class="fas fa-server mr-2"></i>DHCP & DNS Settings</h3>
+                    <div class="space-y-4">
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs font-bold text-gray-500 uppercase">DHCP Start</label>
+                                <input type="text" id="dhcp-start" class="w-full p-2 border rounded font-mono"
+                                    value="192.168.0.10">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-gray-500 uppercase">DHCP Stop</label>
+                                <input type="text" id="dhcp-stop" class="w-full p-2 border rounded font-mono"
+                                    value="192.168.0.254">
+                            </div>
+                        </div>
+                        <div class="space-y-3 mt-4">
+                            <div>
+                                <label class="block text-xs font-bold text-gray-500 uppercase">Primary DNS
+                                    (DNS_1)</label>
+                                <input type="text" id="dns-1" class="w-full p-2 border rounded font-mono"
+                                    value="1.1.1.1">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-gray-500 uppercase">Secondary DNS
+                                    (DNS_2)</label>
+                                <input type="text" id="dns-2" class="w-full p-2 border rounded font-mono"
+                                    value="8.8.8.8">
+                            </div>
+                        </div>
+                        <button
+                            class="mt-6 w-full bg-orange-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-orange-700 transition shadow-lg">
+                            Apply DHCP Configuration
+                        </button>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <script>
+        const loginForm = document.getElementById('login-form');
+        const loginScreen = document.getElementById('login-screen');
+        const dashboard = document.getElementById('dashboard');
+        const API_URL = "/cgi-bin/router_api.py"; // Ścieżka do Twojego skryptu
+
+        // Proste logowanie (w produkcji zrób to bezpieczniej!)
+        const TEMP_USER = "admin";
+        const TEMP_PASS = "admin";
+
+        loginForm.onsubmit = (e) => {
+            e.preventDefault();
+            const userInput = document.getElementById('user').value;
+            const passInput = document.getElementById('pass').value;
+
+            if (userInput === TEMP_USER && passInput === TEMP_PASS) {
+                loginScreen.classList.add('hidden');
+                dashboard.classList.remove('hidden');
+                fetchData(); // Pobierz prawdziwe dane po zalogowaniu
+            } else {
+                alert("Incorrect login or password");
+            }
+        };
+
+        // Funkcja pobierająca dane z backendu (Python)
+        async function fetchData() {
+            const spinner = document.getElementById('loading-spinner');
+            spinner.classList.remove('hidden');
+
+            try {
+                const response = await fetch(API_URL);
+                const data = await response.json();
+
+                // Wypełnianie pól danymi z Pythona
+                document.getElementById('ip-address').innerText = data.ip_address;
+                document.getElementById('ssid-input').value = data.ssid;
+                document.getElementById('pass-input').value = data.wifi_pass;
+
+                // Jeśli backend zwróci dane DHCP (musisz dorobić parsowanie w Pythonie)
+                if (data.dhcp_start) document.getElementById('dhcp-start').value = data.dhcp_start;
+
+                // Ustawienie statycznych wartości (jeśli jeszcze ich nie czytasz z backendu)
+                document.getElementById('in-interface').value = "wlan0";
+                document.getElementById('out-interface').value = "eth0";
+
+            } catch (error) {
+                console.error('Error fetching data:', error);
+                alert("Błąd połączenia z routerem!");
+            } finally {
+                spinner.classList.add('hidden');
+            }
+        }
+
+        // Funkcja wysyłająca nowe ustawienia WiFi
+        async function applyWifi() {
+            const ssid = document.getElementById('ssid-input').value;
+            const password = document.getElementById('pass-input').value;
+
+            if (password.length < 8) {
+                alert("Hasło musi mieć min. 8 znaków!");
+                return;
+            }
+
+            const payload = {
+                action: 'save_wifi',
+                ssid: ssid,
+                password: password
+            };
+
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+
+                if (result.status === 'success') {
+                    alert("Zapisano! Router restartuje WiFi...");
+                } else {
+                    alert("Błąd: " + result.message);
+                }
+            } catch (error) {
+                alert("Błąd wysyłania danych: " + error);
+            }
+        }
+
+        function togglePassword() {
+            const passInput = document.getElementById('pass-input');
+            const passIcon = document.getElementById('pass-icon');
+            if (passInput.type === "password") {
+                passInput.type = "text";
+                passIcon.classList.remove('fa-eye');
+                passIcon.classList.add('fa-eye-slash');
+            } else {
+                passInput.type = "password";
+                passIcon.classList.remove('fa-eye-slash');
+                passIcon.classList.add('fa-eye');
+            }
+        }
+
+        function logout() {
+            location.reload();
+        }
+    </script>
+</body>
+
+</html>
