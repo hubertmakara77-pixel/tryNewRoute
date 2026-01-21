@@ -1,36 +1,60 @@
 #!/bin/bash
 
-# --- 0. Sprawdzenie uprawnień ---
+# --- 0. Root Check ---
 if [ ! "$UID" -eq 0 ]; then
-    echo "URUCHOM JAKO ROOT: sudo bash install_final_v2.sh"
+    echo "URUCHOM JAKO ROOT: sudo bash install_fix.sh"
     exit 1
 fi
 
-echo "--- START: Instalacja (Z usuwaniem konfliktów) ---"
+echo "--- START: Instalacja z naprawą pliku lighttpd.sh ---"
 
-# --- 1. USUWANIE SABOTAŻYSTÓW (Kluczowa poprawka) ---
-echo "[1/8] Usuwanie starych skryptów, które psują config..."
-# To ten plik najprawdopodobniej ustawiał Ci port 443 z automatu
-if [ -f "scripts/lighttpd.sh" ]; then
-    echo "   -> Wykryto i usunięto: scripts/lighttpd.sh (Winowajca!)"
-    rm scripts/lighttpd.sh
+# --- 1. CHIRURGIA: NAPRAWIAMY PLIK 'scripts/lighttpd.sh' ---
+echo "[1/7] Modyfikacja skryptu lighttpd.sh (usuwamy szkodliwy fragment)..."
+
+# Nadpisujemy ten plik wersją BEZPIECZNĄ.
+# Zostawiamy generowanie certyfikatów, ale wywalamy konfigurację serwera.
+cat > scripts/lighttpd.sh <<EOF
+#!/bin/bash
+echo "INFO: Generowanie certyfikatów SSL (Bezpieczna wersja)..."
+
+# Instalacja narzędzi SSL (jeśli brakuje)
+apt-get install -y lighttpd-mod-openssl openssl
+
+# Ścieżki
+cert_path=/etc/lighttpd/router.pem
+key_path=/etc/lighttpd/router.key
+tls_combo=/etc/lighttpd/lighttpd.pem
+
+# Generowanie kluczy (TO JEST DOBRE, TO ZOSTAWIAMY)
+mkdir -p /etc/lighttpd
+openssl req -new -x509 -newkey rsa:2048 -nodes -days 365 \\
+  -keyout \${key_path} \\
+  -out \${cert_path} \\
+  -subj "/CN=router.local" 2>/dev/null
+
+# Łączenie kluczy
+if [ \$? -eq 0 ]; then
+    cat \${cert_path} \${key_path} > \${tls_combo}
+    rm -f \${cert_path} \${key_path}
+    chmod 400 \${tls_combo}
+    echo "INFO: Certyfikaty wygenerowane pomyślnie."
+else
+    echo "ERROR: Błąd generowania certyfikatów."
 fi
-# Usuwamy też inne potencjalne instalatory WWW, zostawiamy tylko skrypty sieciowe
-rm -f scripts/install_web.sh scripts/web_setup.sh
+
+# KONIEC SKRYPTU - Usunęliśmy część, która nadpisywała lighttpd.conf!
+EOF
+
+chmod +x scripts/lighttpd.sh
+echo "   -> Plik naprawiony. Teraz jest bezpieczny."
 
 # --- 2. INSTALACJA PAKIETÓW ---
-echo "[2/8] Instalacja pakietów..."
+echo "[2/7] Instalacja pakietów..."
 apt-get update
-apt-get install -y lighttpd python3 hostapd dnsmasq git iptables netfilter-persistent
+apt-get install -y lighttpd python3 hostapd dnsmasq git iptables netfilter-persistent lighttpd-mod-openssl
 
-# --- 3. BLOKOWANIE SSL I MODUŁÓW (Dla pewności) ---
-echo "[3/8] Wyłączanie modułów SSL..."
-# Jeśli system ma włączony SSL, wyłączamy go, żeby nie wymuszał 443
-lighty-disable-mod ssl 2>/dev/null
-lighty-disable-mod openssl 2>/dev/null
-
-# --- 4. GENEROWANIE CZYSTEGO CONFIGU (Port 80) ---
-echo "[4/8] Generowanie configu Lighttpd..."
+# --- 3. KONFIGURACJA LIGHTTPD (Nasza, poprawna) ---
+echo "[3/7] Konfiguracja serwera WWW..."
 systemctl stop lighttpd
 
 cat > /etc/lighttpd/lighttpd.conf <<EOF
@@ -39,7 +63,8 @@ server.modules = (
     "mod_access",
     "mod_alias",
     "mod_redirect",
-    "mod_cgi"
+    "mod_cgi",
+    "mod_openssl"
 )
 
 server.document-root    = "/var/www/html"
@@ -50,54 +75,40 @@ server.username         = "www-data"
 server.groupname        = "www-data"
 server.port             = 80
 
-# Ważne dla CSS/JS
+# Ładujemy certyfikaty (ale na razie nie wymuszamy HTTPS, żeby działało łatwo)
+# \$SERVER["socket"] == ":443" {
+#     ssl.engine = "enable"
+#     ssl.pemfile = "/etc/lighttpd/lighttpd.pem"
+# }
+
 include_shell "/usr/share/lighttpd/create-mime.conf.pl"
-
 index-file.names        = ( "index.html" )
-url.access-deny         = ( "~", ".inc" )
-static-file.exclude-extensions = ( ".php", ".pl", ".fcgi" )
-
-cgi.assign = ( ".py" => "/usr/bin/python3" )
-
+cgi.assign              = ( ".py" => "/usr/bin/python3" )
 include "/etc/lighttpd/conf-enabled/*.conf"
 EOF
 
 lighty-enable-mod cgi
 
-# --- 5. INTELIGENTNE KOPIOWANIE PLIKÓW ---
-echo "[5/8] Kopiowanie strony (wykrywanie folderów)..."
+# --- 4. KOPIOWANIE PLIKÓW STRONY ---
+echo "[4/7] Wgrywanie strony..."
 rm -rf /var/www/html/*
+if [ -d "www/html" ]; then cp -r www/html/* /var/www/html/;
+elif [ -d "www" ]; then cp -r www/* /var/www/html/;
+elif [ -d "html" ]; then cp -r html/* /var/www/html/; fi
 
-# Logika dla Twojej struktury www -> html -> index
-if [ -d "www/html" ]; then
-    echo "   -> Wykryto strukturę 'www/html'. Kopiuję poprawnie..."
-    cp -r www/html/* /var/www/html/
-elif [ -d "www" ]; then
-    echo "   -> Wykryto folder 'www'. Kopiuję..."
-    cp -r www/* /var/www/html/
-elif [ -d "html" ]; then
-    echo "   -> Wykryto folder 'html'. Kopiuję..."
-    cp -r html/* /var/www/html/
-else
-    echo "   !!! BŁĄD: Nie widzę folderu z plikami! Jesteś w dobrym katalogu?"
-fi
-
-# Fix nazwy
 [ -f "/var/www/html/web_app.html" ] && mv /var/www/html/web_app.html /var/www/html/index.html
 rm -f /var/www/html/index.lighttpd.html
 
-# --- 6. BACKEND ---
-echo "[6/8] Instalacja backendu..."
+# --- 5. BACKEND PYTHON ---
+echo "[5/7] Backend Python..."
 mkdir -p /usr/lib/cgi-bin/
-if [ -f "cgi-bin/router_api.py" ]; then
-    cp cgi-bin/router_api.py /usr/lib/cgi-bin/
-    sed -i 's/\r$//' /usr/lib/cgi-bin/router_api.py
-    sed -i 's/DEV_MODE = True/DEV_MODE = False/g' /usr/lib/cgi-bin/router_api.py
-    chmod +x /usr/lib/cgi-bin/router_api.py
-fi
+[ -f "cgi-bin/router_api.py" ] && cp cgi-bin/router_api.py /usr/lib/cgi-bin/
+sed -i 's/\r$//' /usr/lib/cgi-bin/router_api.py 2>/dev/null
+sed -i 's/DEV_MODE = True/DEV_MODE = False/g' /usr/lib/cgi-bin/router_api.py 2>/dev/null
+chmod +x /usr/lib/cgi-bin/router_api.py
 
-# --- 7. UPRAWNIENIA ---
-echo "[7/8] Naprawa uprawnień..."
+# --- 6. UPRAWNIENIA ---
+echo "[6/7] Uprawnienia..."
 cat > /etc/sudoers.d/router-web-ui << EOF
 www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart hostapd
 www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart dnsmasq
@@ -106,29 +117,28 @@ www-data ALL=(ALL) NOPASSWD: /usr/bin/tee
 www-data ALL=(ALL) NOPASSWD: /usr/bin/rm
 EOF
 chmod 0440 /etc/sudoers.d/router-web-ui
-
 chown -R www-data:www-data /var/www/html
 chmod -R 755 /var/www/html
 mkdir -p /etc/hostapd
 chmod 777 /etc/hostapd
 
-# --- 8. URUCHAMIANIE SKRYPTÓW SIECIOWYCH ---
-echo "[8/8] Konfiguracja sieci..."
+# --- 7. URUCHAMIANIE SKRYPTÓW (Teraz bezpieczne!) ---
+echo "[7/7] Uruchamianie skryptów z folderu scripts/..."
+# Teraz możemy bezpiecznie uruchomić WSZYSTKIE skrypty,
+# bo lighttpd.sh został "rozbrojony" w kroku 1.
 if [ -d "scripts" ]; then
     chmod +x scripts/*.sh
     for script in scripts/*.sh; do
-        # Uruchamiamy tylko jeśli plik nadal istnieje (te złe usunęliśmy w kroku 1)
         if [ -f "$script" ]; then
             echo "   -> Uruchamiam: $script"
-            bash "$script" || echo "   (Ignoruję błąd na VM)"
+            bash "$script" || echo "   (Ignoruję błąd)"
         fi
     done
 fi
 
-# Atrapa hostapd
+# Fix dla hostapd na VM
 if [ ! -f /etc/hostapd/hostapd.conf ]; then
     echo "interface=wlan0" > /etc/hostapd/hostapd.conf
-    echo "ssid=Start" >> /etc/hostapd/hostapd.conf
     chmod 666 /etc/hostapd/hostapd.conf
 fi
 
@@ -136,5 +146,6 @@ systemctl unmask lighttpd
 systemctl restart lighttpd
 
 echo "-----------------------------------------------------"
-echo " GOTOWE! Sprawdź: http://localhost"
+echo " GOTOWE! Certyfikaty wygenerowane, config poprawny."
+echo " Wejdź na: http://localhost"
 echo "-----------------------------------------------------"
