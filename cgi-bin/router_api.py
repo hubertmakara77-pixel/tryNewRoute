@@ -1,67 +1,119 @@
 #!/usr/bin/env python3
-import json, subprocess, os, sys, re
+import os
+import sys
+import json
+import re
+import subprocess
+import tempfile
 
-# Konfiguracja
-HOSTAPD_CONF = "/etc/hostapd/hostapd.conf"
+CFG = "/etc/orangepi-router/config.inc"
+APPLY_HOSTAPD = ["/usr/bin/sudo", "/usr/local/orangepi-router/scripts/hostapd.sh"]
 
-def run(cmd):
-    try: return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.STDOUT).strip()
-    except: return ""
+def respond(code: int, payload: dict):
+    print("Content-Type: application/json")
+    print(f"Status: {code}")
+    print()
+    print(json.dumps(payload))
 
-def get_conf():
-    ip = run("hostname -I | awk '{print $1}'") or "192.168.0.1"
-    data = {'ip_address': ip, 'dhcp_start': '192.168.0.10', 'ssid': '', 'wifi_pass': ''}
+def load_cfg() -> dict:
+    cfg = {}
+    if not os.path.exists(CFG):
+        return cfg
+    with open(CFG, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            cfg[k.strip()] = v.strip()
+    return cfg
+
+def save_cfg(cfg: dict):
+    # zapis atomowy
+    fd, tmp = tempfile.mkstemp()
+    with os.fdopen(fd, "w") as f:
+        f.write("#!/bin/bash\n\n")
+        for k in sorted(cfg.keys()):
+            f.write(f"{k}={cfg[k]}\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CFG)
+
+def get_ip():
     try:
-        if os.path.exists(HOSTAPD_CONF):
-            with open(HOSTAPD_CONF, 'r') as f: c = f.read()
-            s = re.search(r'^ssid=(.*)', c, re.MULTILINE)
-            p = re.search(r'^wpa_passphrase=(.*)', c, re.MULTILINE)
-            data['ssid'] = s.group(1).strip() if s else ""
-            data['wifi_pass'] = p.group(1).strip() if p else ""
-    except: pass
-    return data
+        out = subprocess.check_output(["hostname", "-I"], text=True).strip()
+        return out.split()[0] if out else "---"
+    except Exception:
+        return "---"
 
-def save(ssid, password):
-    if not ssid: return {"status": "error", "message": "Nazwa sieci nie moze byc pusta"}
-    
+def sanitize_value(s: str) -> str:
+    # usuń znaki końca linii, żeby nie rozwalić configu
+    return s.replace("\r", "").replace("\n", "").strip()
+
+def handle_get():
+    cfg = load_cfg()
+    respond(200, {
+        "ip_address": get_ip(),
+        "ssid": cfg.get("AP_SSID", ""),
+        "wifi_pass": cfg.get("AP_PASS", ""),
+        "dhcp_start": cfg.get("DHCP_RANGE_START", ""),
+        "dhcp_stop": cfg.get("DHCP_RANGE_STOP", ""),
+        "dns_1": cfg.get("DHCP_DNS_1", ""),
+        "dns_2": cfg.get("DHCP_DNS_2", ""),
+        "in_interface": cfg.get("IN_INTERFACE", ""),
+        "out_interface": cfg.get("OUT_INTERFACE", ""),
+        "internal_ip": cfg.get("IN_INT_IP", "")
+    })
+
+def handle_post():
+    ln = int(os.environ.get("CONTENT_LENGTH", "0") or "0")
+    raw = sys.stdin.read(ln)
+    data = json.loads(raw) if raw else {}
+
+    action = data.get("action", "")
+
+    if action != "save_wifi":
+        respond(400, {"status": "error", "message": "Nieznana akcja"})
+        return
+
+    ssid = sanitize_value(str(data.get("ssid", "")))
+    password = sanitize_value(str(data.get("password", "")))
+
+    if not (1 <= len(ssid) <= 32):
+        respond(400, {"status": "error", "message": "SSID musi mieć 1–32 znaki"})
+        return
+
+    if len(password) < 8 or len(password) > 63:
+        respond(400, {"status": "error", "message": "Hasło WPA2 musi mieć 8–63 znaki"})
+        return
+
+    # opcjonalnie: ogranicz znaki
+    if not re.match(r'^[ -~]+$', ssid) or not re.match(r'^[ -~]+$', password):
+        respond(400, {"status": "error", "message": "Niedozwolone znaki w SSID/haśle"})
+        return
+
+    cfg = load_cfg()
+    cfg["AP_SSID"] = ssid
+    cfg["AP_PASS"] = password
+    save_cfg(cfg)
+
     try:
-        # 1. ODCZYT
-        lines = []
-        if os.path.exists(HOSTAPD_CONF):
-            with open(HOSTAPD_CONF, 'r') as f: lines = f.readlines()
-        
-        # 2. EDYCJA
-        new_l = []
-        fs, fp = False, False
-        for l in lines:
-            if l.startswith('ssid='): new_l.append(f"ssid={ssid}\n"); fs=True
-            elif l.startswith('wpa_passphrase='): new_l.append(f"wpa_passphrase={password}\n"); fp=True
-            else: new_l.append(l)
-        if not fs: new_l.append(f"ssid={ssid}\n")
-        if not fp: new_l.append(f"wpa_passphrase={password}\n")
-        
-        # 3. ZAPIS (Kluczowy moment)
-        with open(HOSTAPD_CONF, 'w') as f: f.writelines(new_l)
-        
-        # 4. RESTART (Dzięki sudoers to zadziała bez hasła)
-        subprocess.check_output("sudo systemctl restart hostapd", shell=True, stderr=subprocess.STDOUT)
-        
-        return {"status": "success", "message": "Zapisano! Router restartuje sie..."}
-
-    except PermissionError:
-        return {"status": "error", "message": "Blad uprawnien (Permission denied) przy zapisie pliku!"}
+        subprocess.check_output(APPLY_HOSTAPD, stderr=subprocess.STDOUT, text=True)
+        respond(200, {"status": "success", "message": "Zapisano. Zastosowano ustawienia Wi-Fi."})
     except subprocess.CalledProcessError as e:
-        err = e.output if e.output else str(e)
-        return {"status": "error", "message": f"Blad restartu WiFi: {err}"}
-    except Exception as e:
-        return {"status": "error", "message": f"Blad: {str(e)}"}
+        msg = e.output.strip() if e.output else "Błąd uruchomienia hostapd.sh"
+        respond(500, {"status": "error", "message": msg})
 
-# OBSŁUGA ŻĄDAŃ
-print("Content-Type: application/json\n")
-try:
-    if os.environ.get("REQUEST_METHOD") == "POST":
-        ln = int(os.environ.get('CONTENT_LENGTH', 0))
-        d = json.loads(sys.stdin.read(ln))
-        if d.get('action') == 'save_wifi': print(json.dumps(save(d.get('ssid'), d.get('password'))))
-    else: print(json.dumps(get_conf()))
-except Exception as e: print(json.dumps({"status": "error", "message": str(e)}))
+def main():
+    method = os.environ.get("REQUEST_METHOD", "GET").upper()
+    try:
+        if method == "GET":
+            handle_get()
+        elif method == "POST":
+            handle_post()
+        else:
+            respond(405, {"status": "error", "message": "Metoda niedozwolona"})
+    except Exception as e:
+        respond(500, {"status": "error", "message": str(e)})
+
+if __name__ == "__main__":
+    main()
