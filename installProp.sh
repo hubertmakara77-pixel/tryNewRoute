@@ -1,31 +1,48 @@
 #!/bin/bash
 
-# Upewnij się, że jesteś rootem
-if [ "$EUID" -ne 0 ]; then echo "Uruchom przez sudo!"; exit; fi
+# --- 1. SZYBKA NAPRAWA INTERNETU (Bez tego apt update wywala błąd jak na zdjęciu) ---
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
 
-echo "=== START NAPRAWY FINALNEJ ==="
+# --- 2. NAPRAWA LITERÓWEK W TWOIM SKRYPCIE (Network) ---
+# Twój plik network_setup.sh ma błędy (If/Fi z dużej litery), co przerywa instalację.
+# Naprawiamy to "w locie" zanim go uruchomisz.
+if [ -f "scripts/network_setup.sh" ]; then
+    sed -i 's/If /if /g' scripts/network_setup.sh
+    sed -i 's/Fi/fi/g' scripts/network_setup.sh
+    sed -i 's/Chmod/chmod/g' scripts/network_setup.sh
+    sed -i 's/Echo/echo/g' scripts/network_setup.sh
+    sed -i 's/Systemctl/systemctl/g' scripts/network_setup.sh
+fi
 
-# 1. ZDEJMOWANIE BLOKAD (Naprawa błędu "Masked" i "Read-only")
-echo "[1/6] Odblokowywanie systemu..."
-mount -o remount,rw / 2>/dev/null
-# TO NAPRAWIA TWÓJ BŁĄD ZE ZDJĘCIA:
-systemctl unmask hostapd
-systemctl unmask dnsmasq
-systemctl unmask lighttpd
+chmod +x scripts/*.sh
 
-# 2. INSTALACJA PAKIETÓW
-echo "[2/6] Sprawdzanie pakietów..."
-apt-get update -y
-apt-get install -y lighttpd python3 hostapd dnsmasq
+if [ ! $UID -eq 0 ]; then
+	echo "Please run script as root: sudo ./install.sh"
+	exit 0
+fi
 
-# 3. WGRYWANIE BACKENDU PYTHON (Wersja odporna na błędy)
-echo "[3/6] Instalacja skryptu Python..."
+# --- 3. TWOJA CZĘŚĆ (INSTALACJA) ---
+apt update
+# Dodaję ręcznie Pythona, bo Twoje skrypty go nie instalują, a jest potrzebny do strony
+apt install -y python3
+
+set -e
+for script in scripts/*.sh; do
+    echo ">>> Uruchamiam: $script"
+	bash "$script"
+done
+
+# ==========================================================
+# --- 4. MOJE DOPISKI (Żeby strona działała i zmieniała hasło) ---
+# ==========================================================
+
+echo ">>> Konfiguracja Backend Python i Uprawnień..."
+
+# A. Wgrywamy API (Kod Python - ten działający)
 mkdir -p /usr/lib/cgi-bin
-
 cat > /usr/lib/cgi-bin/router_api.py << 'PYTHONEOF'
 #!/usr/bin/env python3
 import json, subprocess, os, sys, re
-
 HOSTAPD_CONF = "/etc/hostapd/hostapd.conf"
 
 def run(cmd):
@@ -46,15 +63,11 @@ def get_conf():
     return data
 
 def save(ssid, password):
-    if not ssid: return {"status": "error", "message": "SSID nie moze byc pusty"}
-    
+    if not ssid: return {"status": "error", "message": "SSID pusty"}
     try:
-        # Odczyt
         lines = []
         if os.path.exists(HOSTAPD_CONF):
             with open(HOSTAPD_CONF, 'r') as f: lines = f.readlines()
-        
-        # Edycja
         new_l = []
         fs, fp = False, False
         for l in lines:
@@ -64,19 +77,11 @@ def save(ssid, password):
         if not fs: new_l.append(f"ssid={ssid}\n")
         if not fp: new_l.append(f"wpa_passphrase={password}\n")
         
-        # Zapis
         with open(HOSTAPD_CONF, 'w') as f: f.writelines(new_l)
-        
-        # Restart (bez sudo, bo user www-data będzie miał uprawnienia w sudoers)
+        # Restart hostapd (dzięki sudoers zadziała bez hasła)
         subprocess.check_output("sudo systemctl restart hostapd", shell=True, stderr=subprocess.STDOUT)
-        
-        return {"status": "success", "message": "Zapisano! Router restartuje sie..."}
-
-    except subprocess.CalledProcessError as e:
-        err = e.output if e.output else str(e)
-        return {"status": "error", "message": f"Blad restartu WiFi: {err}"}
-    except Exception as e:
-        return {"status": "error", "message": f"Blad: {str(e)}"}
+        return {"status": "success", "message": "Zapisano! Restart..."}
+    except Exception as e: return {"status": "error", "message": str(e)}
 
 print("Content-Type: application/json\n")
 try:
@@ -88,25 +93,7 @@ try:
 except Exception as e: print(json.dumps({"status": "error", "message": str(e)}))
 PYTHONEOF
 
-# 4. NAPRAWA UPRAWNIEN (Usuwanie znaków Windowsa i chmod)
-echo "[4/6] Naprawa uprawnień plików..."
-sed -i 's/\r$//' /usr/lib/cgi-bin/router_api.py
-chmod +x /usr/lib/cgi-bin/router_api.py
-chown www-data:www-data /usr/lib/cgi-bin/router_api.py
-
-# Plik konfiguracyjny - musi być dostępny do zapisu
-touch /etc/hostapd/hostapd.conf
-chown www-data:www-data /etc/hostapd/hostapd.conf
-chmod 666 /etc/hostapd/hostapd.conf
-
-# 5. ZEZWOLENIE NA RESTART (sudoers)
-echo "[5/6] Konfiguracja sudoers..."
-rm -f /etc/sudoers.d/router-web
-echo "www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart hostapd" > /etc/sudoers.d/router-web
-chmod 0440 /etc/sudoers.d/router-web
-
-# 6. KONFIGURACJA SERWERA WWW
-echo "[6/6] Restart usług..."
+# B. Konfiguracja Lighttpd (Nadpisujemy config, żeby włączyć obsługę .py)
 cat > /etc/lighttpd/lighttpd.conf <<EOF
 server.modules = ( "mod_access", "mod_alias", "mod_redirect", "mod_cgi" )
 server.document-root = "/var/www/html"
@@ -116,12 +103,24 @@ cgi.assign = ( ".py" => "/usr/bin/python3" )
 include_shell "/usr/share/lighttpd/create-mime.conf.pl"
 EOF
 
-# Restart wszystkiego (teraz zadziała, bo zrobiliśmy unmask)
+# C. Uprawnienia (To jest KLUCZOWE, bez tego masz Permission Denied)
+# 1. Python wykonywalny
+sed -i 's/\r$//' /usr/lib/cgi-bin/router_api.py
+chmod +x /usr/lib/cgi-bin/router_api.py
+chown www-data:www-data /usr/lib/cgi-bin/router_api.py
+
+# 2. Plik hostapd (musi należeć do www-data, bo Twój skrypt tworzy go jako root)
+chown www-data:www-data /etc/hostapd/hostapd.conf
+chmod 666 /etc/hostapd/hostapd.conf
+
+# 3. Zezwolenie na restart w sudoers
+rm -f /etc/sudoers.d/router-web
+echo "www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart hostapd" > /etc/sudoers.d/router-web
+chmod 0440 /etc/sudoers.d/router-web
+
+# Restart usług na koniec
 systemctl restart lighttpd
-systemctl restart dnsmasq
+# Upewniamy się, że Twoje serwisy wstają
 systemctl restart hostapd
 
-echo "========================================="
-echo " SUKCES! Blokada 'masked' zdjęta."
-echo " Strona powinna teraz zmieniać hasło."
-echo "========================================="
+echo "=== GOTOWE ==="
