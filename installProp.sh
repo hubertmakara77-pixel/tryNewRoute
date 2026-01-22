@@ -1,28 +1,47 @@
 #!/bin/bash
 
-# --- 0. SPRAWDZENIE ROOT ---
-if [ ! "$UID" -eq 0 ]; then
-    echo "URUCHOM JAKO ROOT: sudo bash install_ultra.sh"
-    exit 1
+# --- SPRAWDZENIE UPRAWNIEŃ ---
+if [ "$EUID" -ne 0 ]; then
+  echo "Uruchom jako root (sudo bash install_custom.sh)"
+  exit
 fi
 
-echo "--- START: INSTALACJA ULTRA (Wszystko w jednym) ---"
+echo "=== START INSTALACJI (Z zachowaniem Twoich plików) ==="
 
-# --- 1. INSTALACJA WSZYSTKICH PAKIETÓW ---
-echo "[1/9] Instalacja pakietów (WWW, Python, Sieć, Firewall)..."
+# 1. INSTALACJA PAKIETÓW (Wymagane, żeby system działał)
+echo "[1/7] Instalowanie programów..."
 apt-get update
-# Instalujemy wszystko, włącznie z narzędziami do trwałego zapisu firewalla
-apt-get install -y lighttpd python3 hostapd dnsmasq git iptables netfilter-persistent iptables-persistent dos2unix
+apt-get install -y hostapd dnsmasq lighttpd python3 iptables netfilter-persistent iptables-persistent
 
-# --- 2. USUWANIE STARYCH KONFLIKTÓW ---
-echo "[2/9] Usuwanie błędnych skryptów z repozytorium..."
-rm -f scripts/lighttpd.sh
-rm -f scripts/install_web.sh
+# 2. KOPIOWANIE TWOICH PLIKÓW KONFIGURACYJNYCH
+echo "[2/7] Kopiowanie Twoich ustawień..."
 
-# --- 3. KONFIGURACJA SERWERA WWW (Port 80) ---
-echo "[3/9] Konfiguracja Lighttpd..."
+# Szukamy hostapd.conf u Ciebie w folderze i kopiujemy
+if [ -f "hostapd.conf" ]; then
+    cp hostapd.conf /etc/hostapd/hostapd.conf
+    echo " -> Skopiowano Twój hostapd.conf (luzem)"
+elif [ -f "conf/hostapd.conf" ]; then
+    cp conf/hostapd.conf /etc/hostapd/hostapd.conf
+    echo " -> Skopiowano Twój hostapd.conf (z folderu conf)"
+elif [ -f "scripts/hostapd.conf" ]; then
+    cp scripts/hostapd.conf /etc/hostapd/hostapd.conf
+    echo " -> Skopiowano Twój hostapd.conf (z folderu scripts)"
+else
+    echo "UWAGA: Nie znaleziono Twojego pliku hostapd.conf! Zostawiam ten, który jest w systemie."
+fi
+
+# Szukamy dnsmasq.conf
+if [ -f "dnsmasq.conf" ]; then
+    cp dnsmasq.conf /etc/dnsmasq.conf
+    echo " -> Skopiowano Twój dnsmasq.conf"
+elif [ -f "conf/dnsmasq.conf" ]; then
+    cp conf/dnsmasq.conf /etc/dnsmasq.conf
+    echo " -> Skopiowano Twój dnsmasq.conf (z folderu conf)"
+fi
+
+# 3. KONFIGURACJA LIGHTTPD (Techniczna - musi być, żeby Python działał)
+echo "[3/7] Konfiguracja serwera WWW (CGI)..."
 systemctl stop lighttpd
-
 cat > /etc/lighttpd/lighttpd.conf <<EOF
 server.modules = (
     "mod_indexfile", "mod_access", "mod_alias", "mod_redirect", "mod_cgi"
@@ -34,32 +53,29 @@ server.pid-file         = "/run/lighttpd.pid"
 server.username         = "www-data"
 server.groupname        = "www-data"
 server.port             = 80
-
-include_shell "/usr/share/lighttpd/create-mime.conf.pl"
 index-file.names        = ( "index.html" )
 static-file.exclude-extensions = ( ".php", ".pl", ".fcgi" )
 cgi.assign = ( ".py" => "/usr/bin/python3" )
+include_shell "/usr/share/lighttpd/create-mime.conf.pl"
 include "/etc/lighttpd/conf-enabled/*.conf"
 EOF
-
 lighty-enable-mod cgi
 
-# --- 4. WGRYWANIE STRONY WWW ---
-echo "[4/9] Kopiowanie plików strony..."
-rm -rf /var/www/html/*
-if [ -d "www/html" ]; then cp -r www/html/* /var/www/html/;
+# 4. KOPIOWANIE STRONY WWW
+echo "[4/7] Kopiowanie plików strony..."
+# Kopiujemy tylko jeśli są w folderze
+if [ -d "www/html" ]; then cp -r www/html/* /var/www/html/; 
 elif [ -d "www" ]; then cp -r www/* /var/www/html/;
 elif [ -d "html" ]; then cp -r html/* /var/www/html/; fi
 
 [ -f "/var/www/html/web_app.html" ] && mv /var/www/html/web_app.html /var/www/html/index.html
-rm -f /var/www/html/index.lighttpd.html
 
-# --- 5. GENEROWANIE POPRAWNEGO PYTHON API (Wersja 2025) ---
-echo "[5/9] Tworzenie backendu Python (bez błędu CGI)..."
-mkdir -p /usr/lib/cgi-bin/
+# 5. WGRYWANIE NAPRAWIONEGO PYTHONA (API)
+# Ten kod MUSI być wgrany, żeby strona działała, ale on CZYTA Twoje pliki, nie nadpisuje ich.
+echo "[5/7] Instalacja backendu Python..."
+mkdir -p /usr/lib/cgi-bin
 
-# Tworzymy plik Pythona od zera, żeby uniknąć problemów z Windows/Linux
-cat > /usr/lib/cgi-bin/router_api.py << 'PYTHON_EOF'
+cat > /usr/lib/cgi-bin/router_api.py << 'PYTHONEOF'
 #!/usr/bin/env python3
 import json
 import subprocess
@@ -73,13 +89,11 @@ def run_command(command):
     try:
         result = subprocess.check_output(command, shell=True, text=True, stderr=subprocess.STDOUT)
         return result.strip()
-    except:
-        return ""
+    except: return ""
 
-def get_config():
+def get_current_config():
     data = {'dhcp_start': '192.168.0.10'}
-    data['ip_address'] = run_command("hostname -I | awk '{print $1}'") or "0.0.0.0"
-    
+    data['ip_address'] = run_command("hostname -I | awk '{print $1}'") or "192.168.0.1"
     try:
         if os.path.exists(HOSTAPD_CONF):
             with open(HOSTAPD_CONF, 'r') as f:
@@ -91,15 +105,12 @@ def get_config():
     except: pass
     return data
 
-def save_wifi(ssid, password):
+def save_wifi_config(ssid, password):
     if not ssid: return {"status": "error", "message": "No SSID"}
     try:
-        # Zapis bezpośredni (uprawnienia załatwione w bashu)
-        lines = ["interface=wlan0\n", "hw_mode=g\n", "channel=7\n", "wpa=2\n", 
-                 "wpa_key_mgmt=WPA-PSK\n", "rsn_pairwise=CCMP\n"]
+        lines = []
         if os.path.exists(HOSTAPD_CONF):
-            with open(HOSTAPD_CONF, 'r') as f:
-                lines = f.readlines()
+            with open(HOSTAPD_CONF, 'r') as f: lines = f.readlines()
         
         new_lines = []
         found_s, found_p = False, False
@@ -109,101 +120,74 @@ def save_wifi(ssid, password):
             elif line.startswith('wpa_passphrase='):
                 new_lines.append(f"wpa_passphrase={password}\n"); found_p = True
             else: new_lines.append(line)
-        
+            
         if not found_s: new_lines.append(f"ssid={ssid}\n")
         if not found_p: new_lines.append(f"wpa_passphrase={password}\n")
-
+        
         with open(HOSTAPD_CONF, 'w') as f: f.writelines(new_lines)
         run_command("sudo systemctl restart hostapd")
         return {"status": "success", "message": "Saved"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    except Exception as e: return {"status": "error", "message": str(e)}
 
 print("Content-Type: application/json\n")
-if os.environ.get("REQUEST_METHOD") == "GET":
-    print(json.dumps(get_config()))
-elif os.environ.get("REQUEST_METHOD") == "POST":
-    try:
+try:
+    if os.environ.get("REQUEST_METHOD") == "POST":
         ln = int(os.environ.get('CONTENT_LENGTH', 0))
         if ln > 0:
             d = json.loads(sys.stdin.read(ln))
             if d.get('action') == 'save_wifi':
-                print(json.dumps(save_wifi(d.get('ssid'), d.get('password'))))
-    except: print(json.dumps({"status": "error"}))
-PYTHON_EOF
+                print(json.dumps(save_wifi_config(d.get('ssid'), d.get('password'))))
+    else: print(json.dumps(get_current_config()))
+except: print(json.dumps({"status": "error"}))
+PYTHONEOF
 
 chmod +x /usr/lib/cgi-bin/router_api.py
 
-# --- 6. UPRAWNIENIA I WŁAŚCICIEL (Żeby Python mógł zapisywać) ---
-echo "[6/9] Nadawanie uprawnień..."
-mkdir -p /etc/hostapd
-touch /etc/hostapd/hostapd.conf
-# Kluczowy moment: dajemy plik configu we władanie strony WWW
+# 6. INTERNET (NAPRAWA POŁĄCZENIA)
+echo "[6/7] Konfiguracja Internetu (Maskarada)..."
+echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-ipforward.conf
+sysctl -p /etc/sysctl.d/99-ipforward.conf
+
+iptables -F
+iptables -t nat -F
+# Wykrywanie kabla
+ETH=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^(e|en)' | head -n 1)
+[ -z "$ETH" ] && ETH="end0"
+
+iptables -t nat -A POSTROUTING -o $ETH -j MASQUERADE
+iptables -A FORWARD -i $ETH -o wlan0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -A FORWARD -i wlan0 -o $ETH -j ACCEPT
+
+netfilter-persistent save
+
+# Wymuszenie IP routera
+ip link set wlan0 down
+ip addr flush dev wlan0
+ip addr add 192.168.0.1/24 dev wlan0
+ip link set wlan0 up
+
+# 7. UPRAWNIENIA I START
+echo "[7/7] Nadawanie uprawnień (chown) i restart..."
+
+# KLUCZOWE: Oddajemy Twój plik stronie WWW, żeby mogła go czytać/edytować
 chown www-data:www-data /etc/hostapd/hostapd.conf
 chmod 664 /etc/hostapd/hostapd.conf
 
-cat > /etc/sudoers.d/router-web-ui << EOF
+# Uprawnienia sudo dla WWW
+cat > /etc/sudoers.d/router-web <<EOF
 www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart hostapd
-www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart dnsmasq
-www-data ALL=(ALL) NOPASSWD: /usr/bin/ip
 EOF
-chmod 0440 /etc/sudoers.d/router-web-ui
-chown -R www-data:www-data /var/www/html
+chmod 0440 /etc/sudoers.d/router-web
 
-# --- 7. FIREWALL I INTERNET (To o co prosiłeś!) ---
-echo "[7/9] Konfiguracja Firewalla i Internetu (Automatyczna)..."
+# Odblokowanie usług
+systemctl stop systemd-resolved
+systemctl disable systemd-resolved
+systemctl unmask hostapd
 
-# Włączamy przekazywanie pakietów (Internet)
-echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-router.conf
-sysctl -p /etc/sysctl.d/99-router.conf
-
-# Czyścimy stare reguły
-iptables -F
-iptables -t nat -F
-
-# Ustawiamy Maskaradę (Internet z kabla end0/eth0 idzie do WiFi)
-# Próbujemy wykryć interfejs, zazwyczaj end0 na Orange Pi Zero 3
-IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
-if [ -z "$IFACE" ]; then IFACE="end0"; fi
-echo "   -> Wykryto interfejs internetowy: $IFACE"
-
-iptables -t nat -A POSTROUTING -o $IFACE -j MASQUERADE
-
-# Otwieramy Port 80 (WWW), 53 (DNS), 67 (DHCP)
-iptables -A INPUT -p tcp --dport 80 -j ACCEPT
-iptables -A INPUT -p tcp --dport 8080 -j ACCEPT
-iptables -A INPUT -i wlan0 -p udp --dport 53 -j ACCEPT
-iptables -A INPUT -i wlan0 -p udp --dport 67 -j ACCEPT
-
-# ZAPISUJEMY TO NA STAŁE
-netfilter-persistent save
-systemctl enable netfilter-persistent
-
-# --- 8. URUCHOMIENIE ORYGINALNYCH SKRYPTÓW (Dla WiFi) ---
-echo "[8/9] Konfiguracja Access Pointa..."
-# Naprawiamy literówkę w network_setup.sh jeśli istnieje
-if [ -f "scripts/network_setup.sh" ]; then
-    sed -i 's/If \[/if \[/g' scripts/network_setup.sh
-fi
-
-if [ -d "scripts" ]; then
-    chmod +x scripts/*.sh
-    # Uruchamiamy setup interfejsów i AP, ale firewall już mamy gotowy
-    ./scripts/interfaces_setup.sh 2>/dev/null
-    ./scripts/hostapd_setup.sh 2>/dev/null
-    ./scripts/dnsmasq_setup.sh 2>/dev/null
-fi
-
-# --- 9. FINAŁ ---
-echo "[9/9] Restart usług..."
-systemctl unmask lighttpd
-systemctl restart lighttpd
-systemctl restart hostapd
 systemctl restart dnsmasq
+systemctl restart hostapd
+systemctl restart lighttpd
 
-echo "======================================================"
-echo " SUKCES ULTRA! Wszystko zainstalowane."
-echo " 1. Internet (Maskarada) jest włączony i zapisany."
-echo " 2. Strona WWW działa na porcie 80."
-echo " 3. Python backend jest naprawiony."
-echo "======================================================"
+echo "=== GOTOWE ==="
+echo "Użyto Twoich plików konfiguracyjnych."
+echo "Internet i strona powinny działać."
