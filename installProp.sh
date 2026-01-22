@@ -1,11 +1,14 @@
 #!/bin/bash
 
-# --- 1. SZYBKA NAPRAWA INTERNETU (Bez tego apt update wywala błąd jak na zdjęciu) ---
-echo "nameserver 8.8.8.8" > /etc/resolv.conf
+# --- 1. TWÓJ POCZĄTEK (Z małą poprawką na Pythona) ---
+chmod +x scripts/*.sh
 
-# --- 2. NAPRAWA LITERÓWEK W TWOIM SKRYPCIE (Network) ---
-# Twój plik network_setup.sh ma błędy (If/Fi z dużej litery), co przerywa instalację.
-# Naprawiamy to "w locie" zanim go uruchomisz.
+if [ ! $UID -eq 0 ]; then
+	echo "Please run script as root: sudo ./install.sh"
+	exit 0
+fi
+
+# Naprawiamy literówki w Twoim pliku (If -> if), żeby pętla się nie wywaliła
 if [ -f "scripts/network_setup.sh" ]; then
     sed -i 's/If /if /g' scripts/network_setup.sh
     sed -i 's/Fi/fi/g' scripts/network_setup.sh
@@ -14,31 +17,23 @@ if [ -f "scripts/network_setup.sh" ]; then
     sed -i 's/Systemctl/systemctl/g' scripts/network_setup.sh
 fi
 
-chmod +x scripts/*.sh
-
-if [ ! $UID -eq 0 ]; then
-	echo "Please run script as root: sudo ./install.sh"
-	exit 0
-fi
-
-# --- 3. TWOJA CZĘŚĆ (INSTALACJA) ---
+echo ">>> Aktualizacja i instalacja Pythona..."
 apt update
-# Dodaję ręcznie Pythona, bo Twoje skrypty go nie instalują, a jest potrzebny do strony
-apt install -y python3
+# Dodaję to tutaj, bo Twoje skrypty tego nie mają, a strona tego wymaga
+apt install -y python3 lighttpd hostapd dnsmasq
 
+# --- 2. TWOJA PĘTLA (Uruchamia Twoje skrypty) ---
 set -e
 for script in scripts/*.sh; do
     echo ">>> Uruchamiam: $script"
 	bash "$script"
 done
+set +e
 
-# ==========================================================
-# --- 4. MOJE DOPISKI (Żeby strona działała i zmieniała hasło) ---
-# ==========================================================
-
+# --- 3. MOJA CZĘŚĆ (Tylko to, co niezbędne dla strony) ---
 echo ">>> Konfiguracja Backend Python i Uprawnień..."
 
-# A. Wgrywamy API (Kod Python - ten działający)
+# A. Wgrywamy API (Kod Python)
 mkdir -p /usr/lib/cgi-bin
 cat > /usr/lib/cgi-bin/router_api.py << 'PYTHONEOF'
 #!/usr/bin/env python3
@@ -78,7 +73,6 @@ def save(ssid, password):
         if not fp: new_l.append(f"wpa_passphrase={password}\n")
         
         with open(HOSTAPD_CONF, 'w') as f: f.writelines(new_l)
-        # Restart hostapd (dzięki sudoers zadziała bez hasła)
         subprocess.check_output("sudo systemctl restart hostapd", shell=True, stderr=subprocess.STDOUT)
         return {"status": "success", "message": "Zapisano! Restart..."}
     except Exception as e: return {"status": "error", "message": str(e)}
@@ -93,7 +87,7 @@ try:
 except Exception as e: print(json.dumps({"status": "error", "message": str(e)}))
 PYTHONEOF
 
-# B. Konfiguracja Lighttpd (Nadpisujemy config, żeby włączyć obsługę .py)
+# B. Konfiguracja Lighttpd (Włączamy obsługę Pythona)
 cat > /etc/lighttpd/lighttpd.conf <<EOF
 server.modules = ( "mod_access", "mod_alias", "mod_redirect", "mod_cgi" )
 server.document-root = "/var/www/html"
@@ -103,24 +97,22 @@ cgi.assign = ( ".py" => "/usr/bin/python3" )
 include_shell "/usr/share/lighttpd/create-mime.conf.pl"
 EOF
 
-# C. Uprawnienia (To jest KLUCZOWE, bez tego masz Permission Denied)
-# 1. Python wykonywalny
+# C. Uprawnienia (Żeby strona mogła zmieniać hasło)
 sed -i 's/\r$//' /usr/lib/cgi-bin/router_api.py
 chmod +x /usr/lib/cgi-bin/router_api.py
 chown www-data:www-data /usr/lib/cgi-bin/router_api.py
 
-# 2. Plik hostapd (musi należeć do www-data, bo Twój skrypt tworzy go jako root)
+# Plik hostapd (musi być zapisywalny dla www-data)
 chown www-data:www-data /etc/hostapd/hostapd.conf
 chmod 666 /etc/hostapd/hostapd.conf
 
-# 3. Zezwolenie na restart w sudoers
+# Zezwolenie na restart w sudoers
 rm -f /etc/sudoers.d/router-web
 echo "www-data ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart hostapd" > /etc/sudoers.d/router-web
 chmod 0440 /etc/sudoers.d/router-web
 
-# Restart usług na koniec
+# Restart usług
 systemctl restart lighttpd
-# Upewniamy się, że Twoje serwisy wstają
 systemctl restart hostapd
 
 echo "=== GOTOWE ==="
