@@ -1,167 +1,159 @@
 #!/usr/bin/env python3
 import json
-import os
-import re
 import subprocess
+import os
 import sys
-from typing import Dict, List
+import re
+import traceback
 
-# Po instalacji konfiguracja będzie trzymana tutaj:
-CONFIG_PATH = "/etc/router/config.inc"
+# --- KONFIGURACJA ---
+# Ustaw na False na produkcji (Orange Pi)
+DEV_MODE = False
 
-# Root-helper, który stosuje zmiany WiFi (zrobi hostapd.conf + restart hostapd)
-APPLY_WIFI_HELPER = "/usr/local/sbin/router_apply_wifi.sh"
+if DEV_MODE:
+    HOSTAPD_CONF = "mock_hostapd.conf"
+    DNSMASQ_CONF = "mock_dnsmasq.conf"
+else:
+    HOSTAPD_CONF = "/etc/hostapd/hostapd.conf"
+    DNSMASQ_CONF = "/etc/dnsmasq.conf"
 
-
-def _send_json(status_code: int, payload: dict) -> None:
-    sys.stdout.write("Content-Type: application/json\r\n")
-    sys.stdout.write(f"Status: {status_code}\r\n\r\n")
-    sys.stdout.write(json.dumps(payload))
-
-
-def _read_body() -> str:
-    try:
-        length = int(os.environ.get("CONTENT_LENGTH", "0"))
-    except ValueError:
-        length = 0
-    if length <= 0:
+def run_command(command):
+    """Wykonywanie komend z obsługą błędów"""
+    if DEV_MODE:
+        if "ip -4" in command:
+            return "192.168.100.1"
         return ""
-    return sys.stdin.read(length)
-
-
-def _parse_config_lines(lines: List[str]) -> Dict[str, str]:
-    cfg: Dict[str, str] = {}
-    for line in lines:
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", s)
-        if not m:
-            continue
-        k = m.group(1)
-        v = m.group(2).strip()
-        # Usuń ewentualne cudzysłowy (na wypadek gdyby ktoś je dodał)
-        if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
-            v = v[1:-1]
-        cfg[k] = v
-    return cfg
-
-
-def _read_config_file(path: str) -> List[str]:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.readlines()
-
-
-def _write_config_file_atomic(path: str, lines: List[str]) -> None:
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.writelines(lines)
-    os.replace(tmp, path)
-
-
-def _update_config_keys(path: str, updates: Dict[str, str]) -> None:
-    lines = _read_config_file(path)
-
-    found = set()
-    out: List[str] = []
-
-    for line in lines:
-        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line.strip())
-        if m:
-            k = m.group(1)
-            if k in updates:
-                # zapis w stylu Twojego config.inc: KEY=value (bez cudzysłowów)
-                out.append(f"{k}={updates[k]}\n")
-                found.add(k)
-                continue
-        out.append(line)
-
-    missing = [k for k in updates.keys() if k not in found]
-    if missing:
-        out.append("\n# Added by router_api.py\n")
-        for k in missing:
-            out.append(f"{k}={updates[k]}\n")
-
-    _write_config_file_atomic(path, out)
-
-
-def _safe_text(v: str, max_len: int) -> str:
-    v = (v or "").strip()
-    if not v:
-        raise ValueError("Empty value")
-    if len(v) > max_len:
-        raise ValueError("Value too long")
-    if any(c in v for c in ["\r", "\n", "\t", "\0"]):
-        raise ValueError("Invalid characters")
-    return v
-
-
-def handle_get() -> None:
-    try:
-        lines = _read_config_file(CONFIG_PATH)
-    except FileNotFoundError:
-        _send_json(500, {"status": "error", "message": f"Missing config: {CONFIG_PATH}"})
-        return
-
-    cfg = _parse_config_lines(lines)
-
-    _send_json(200, {
-        "ip_address": cfg.get("IN_INT_IP", "192.168.0.1"),
-        "ssid": cfg.get("AP_SSID", ""),
-        "wifi_pass": cfg.get("AP_PASS", ""),
-        "dhcp_start": cfg.get("DHCP_RANGE_START", ""),
-        "dhcp_stop": cfg.get("DHCP_RANGE_STOP", ""),
-        "dns_1": cfg.get("DHCP_DNS_1", ""),
-        "dns_2": cfg.get("DHCP_DNS_2", ""),
-    })
-
-
-def handle_post() -> None:
-    body = _read_body()
-    try:
-        req = json.loads(body) if body else {}
-    except json.JSONDecodeError:
-        _send_json(400, {"status": "error", "message": "Invalid JSON"})
-        return
-
-    if req.get("action") != "save_wifi":
-        _send_json(400, {"status": "error", "message": "Unknown action"})
-        return
 
     try:
-        ssid = _safe_text(req.get("ssid", ""), max_len=32)
-        password = _safe_text(req.get("password", ""), max_len=63)
-        if len(password) < 8:
-            raise ValueError("Hasło musi mieć min. 8 znaków")
-    except ValueError as e:
-        _send_json(400, {"status": "error", "message": str(e)})
-        return
+        # Używamy shell=True, aby obsłużyć potoki i sudo
+        result = subprocess.check_output(command, shell=True, text=True, stderr=subprocess.STDOUT)
+        return result.strip()
+    except subprocess.CalledProcessError:
+        return ""
+    except Exception:
+        return ""
 
+def get_current_config():
+    data = {}
+
+    # 1. IP
+    data['ip_address'] = run_command("ip -4 addr show wlan0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1") or run_command("hostname -I | awk '{print $1}'") or "0.0.0.0"
+
+    # 2. WiFi Config
     try:
-        _update_config_keys(CONFIG_PATH, {"AP_SSID": ssid, "AP_PASS": password})
+        if os.path.exists(HOSTAPD_CONF):
+            with open(HOSTAPD_CONF, 'r') as f:
+                content = f.read()
+                
+                ssid_match = re.search(r'^ssid=(.*)', content, re.MULTILINE)
+                pass_match = re.search(r'^wpa_passphrase=(.*)', content, re.MULTILINE)
+
+                data['ssid'] = ssid_match.group(1).strip() if ssid_match else ""
+                data['wifi_pass'] = pass_match.group(1).strip() if pass_match else ""
+        else:
+            data['ssid'] = "Brak pliku config"
+            data['wifi_pass'] = ""
+
     except Exception as e:
-        _send_json(500, {"status": "error", "message": f"Failed to update config: {e}"})
-        return
+        data['ssid'] = f"Error reading config: {str(e)}"
+        data['wifi_pass'] = ""
 
-    # Zastosuj zmiany: hostapd.conf + restart hostapd (root helper przez sudoers)
+    # 3. DHCP (Stała wartość lub odczytana z dnsmasq)
+    data['dhcp_start'] = "192.168.0.10" 
+
+    return data
+
+def save_wifi_config(ssid, password):
+    # Walidacja podstawowa
+    if not ssid or len(ssid) < 1:
+        return {"status": "error", "message": "SSID cannot be empty"}
+    
+    # --- ZAPIS BEZPOŚREDNI (Najpewniejsza metoda) ---
     try:
-        subprocess.check_call(["/usr/bin/sudo", APPLY_WIFI_HELPER])
+        # Odczytujemy stary plik
+        current_lines = []
+        if os.path.exists(HOSTAPD_CONF):
+            with open(HOSTAPD_CONF, 'r') as f:
+                current_lines = f.readlines()
+        
+        # Jeśli plik był pusty, dodajemy podstawy
+        if not current_lines:
+            current_lines = ["interface=wlan0\n", "hw_mode=g\n", "channel=7\n", "wpa=2\n", "wpa_key_mgmt=WPA-PSK\n", "rsn_pairwise=CCMP\n"]
+
+        new_lines = []
+        found_ssid = False
+        found_pass = False
+
+        for line in current_lines:
+            if line.strip().startswith('ssid='):
+                new_lines.append(f"ssid={ssid}\n")
+                found_ssid = True
+            elif line.strip().startswith('wpa_passphrase='):
+                new_lines.append(f"wpa_passphrase={password}\n")
+                found_pass = True
+            else:
+                new_lines.append(line)
+        
+        if not found_ssid:
+            new_lines.append(f"ssid={ssid}\n")
+        if not found_pass:
+            new_lines.append(f"wpa_passphrase={password}\n")
+
+        # Zapisujemy BEZPOŚREDNIO do pliku (wymaga, aby właścicielem był www-data)
+        if not DEV_MODE:
+            with open(HOSTAPD_CONF, 'w') as f:
+                f.writelines(new_lines)
+            
+            # Restartujemy usługę (to wymaga sudo, ale mamy to w sudoers)
+            run_command("sudo systemctl restart hostapd")
+
+        return {"status": "success", "message": "WiFi settings saved directly."}
+
     except Exception as e:
-        _send_json(500, {"status": "error", "message": f"Failed to apply WiFi: {e}"})
-        return
+        return {"status": "error", "message": f"Save failed: {str(e)}"}
 
-    _send_json(200, {"status": "success", "message": "Zapisano. WiFi zaktualizowane."})
-
-
-def main() -> None:
-    method = os.environ.get("REQUEST_METHOD", "GET").upper()
-    if method == "GET":
-        handle_get()
-    elif method == "POST":
-        handle_post()
-    else:
-        _send_json(405, {"status": "error", "message": "Method not allowed"})
-
-
+# --- GŁÓWNA OBSŁUGA ---
 if __name__ == "__main__":
-    main()
+    # Musimy wypisać nagłówek Content-Type, inaczej przeglądarka zgłosi błąd 500
+    print("Content-Type: application/json\n")
+
+    try:
+        method = os.environ.get("REQUEST_METHOD", "GET")
+
+        if method == "GET":
+            print(json.dumps(get_current_config()))
+
+        elif method == "POST":
+            # Ręczne pobieranie danych POST (zastępuje cgi.FieldStorage)
+            try:
+                content_length = int(os.environ.get('CONTENT_LENGTH', 0))
+            except (ValueError, TypeError):
+                content_length = 0
+
+            if content_length > 0:
+                post_body = sys.stdin.read(content_length)
+                try:
+                    request_data = json.loads(post_body)
+                    
+                    action = request_data.get('action')
+                    if action == 'save_wifi':
+                        result = save_wifi_config(request_data.get('ssid'), request_data.get('password'))
+                        print(json.dumps(result))
+                    else:
+                        print(json.dumps({"status": "error", "message": "Unknown action"}))
+                except json.JSONDecodeError:
+                    print(json.dumps({"status": "error", "message": "Invalid JSON data"}))
+            else:
+                print(json.dumps({"status": "error", "message": "No data received"}))
+        
+        else:
+             print(json.dumps({"status": "error", "message": "Method not allowed"}))
+
+    except Exception as e:
+        # Awaryjna obsługa błędów - zastępuje cgitb
+        error_msg = {
+            "status": "critical_error",
+            "message": str(e),
+            "trace": traceback.format_exc()
+        }
+        print(json.dumps(error_msg))
